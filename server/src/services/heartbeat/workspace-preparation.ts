@@ -1,3 +1,6 @@
+import { reserveFreshPluginTaskWorkspace, stageProviderFreshWorkspace } from "../provider-fresh-workspace.js";
+import { freshWorkspaceSchema, type PluginFreshWorkspace } from "@paperclipai/plugin-sdk";
+import { pluginRegistryService } from "../plugin-registry.js";
 import { attachPreservedWorkspaceSnapshots } from "../workspace-recovery-snapshot.js";
 import { materializeFreshWorkspaceSeed } from "../fresh-workspace-seed.js";
 import { assertTaskWorkspaceExecutionAccess } from "../task-workspace-access.js";
@@ -27,7 +30,7 @@ import path from "node:path";
 import { CONTROLLER_PROVISION_COPY_ONLY, workspaceRequiresCopyOnlyProvisioning } from "../workspace-host-provision.js";
 import { and, asc, eq } from "drizzle-orm";
 import { type ExecutionWorkspace } from "@paperclipai/shared";
-import { heartbeatRuns, issues, projectWorkspaces } from "@paperclipai/db";
+import { executionWorkspaces as executionWorkspacesTable, heartbeatRuns, issues, projectWorkspaces } from "@paperclipai/db";
 import { getStartupTracer } from "../../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "../duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "../tool-runtime-metrics.js";
@@ -216,11 +219,14 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     appendRunEvent,
   } = input.services;
   const pluginTaskWorkspace = selectedEnvironmentForConfig?.driver === "plugin" && agent.adapterType === "paperclip_runner";
+  const pluginConfig = parseObject(selectedEnvironmentForConfig?.config);
   if (fresh && !isDotRun && pluginTaskWorkspace) {
-    throw new WorkspaceValidationFailure("A fresh attempt is unavailable for this workspace storage provider. The existing workspace is retained.",
+    const plugin = typeof pluginConfig.pluginKey === "string" ? await pluginRegistryService(db).getByKey(pluginConfig.pluginKey) : null;
+    const driver = plugin?.manifestJson.environmentDrivers?.find(value => value.driverKey === pluginConfig.driverKey);
+    if (driver?.freshWorkspaceVersion !== 1) throw new WorkspaceValidationFailure(
+      "A fresh attempt is unavailable for this workspace storage provider. The existing workspace is retained.",
       { reason: "fresh_workspace_storage_unsupported" });
   }
-  const pluginConfig = parseObject(selectedEnvironmentForConfig?.config);
   const taskWorkspaceOwner = pluginTaskWorkspace ? { agentId: agent.id, environmentId: selectedEnvironmentForConfig.id,
     pluginKey: pluginConfig.pluginKey ?? null, driverKey: pluginConfig.driverKey ?? null } : null;
   for (const workspace of [existingExecutionWorkspace, reusableExistingExecutionWorkspace]) {
@@ -375,20 +381,30 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     },
   }));
   const hostProvisionDriver = selectedEnvironmentForConfig?.driver ?? lowTrustPreflightEnvironmentDriver;
-  if (fresh && !isDotRun) {
-    const sourceWorkspace = reusableExistingExecutionWorkspace ?? existingExecutionWorkspace;
-    if (sourceWorkspace?.providerType === "plugin" ||
-        readWorkspaceProviderBinding(sourceWorkspace?.metadata) ||
+  let providerFresh: PluginFreshWorkspace | undefined;
+  let previousProviderWorkspaceId: string | null = null;
+  let previousProviderBindingRevision = 0;
+  if (input.task.freshWorkspace?.mode === "fresh_isolated_workspace" && !isDotRun && issueId) {
+    const [task] = await db.select({ workspaceId: issues.executionWorkspaceId, revision: issues.workspaceBindingRevision }).from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)));
+    previousProviderWorkspaceId = task?.workspaceId ?? null;
+    previousProviderBindingRevision = task?.revision ?? 0;
+    const [previous] = previousProviderWorkspaceId ? await db.select().from(executionWorkspacesTable)
+      .where(and(eq(executionWorkspacesTable.id, previousProviderWorkspaceId), eq(executionWorkspacesTable.companyId, agent.companyId))) : [];
+    if (pluginTaskWorkspace || previous?.providerType === "plugin" ||
         (resolvedWorkspace.workspaceId && projectExecutionWorkspacePolicy?.storageProviderPluginId)) {
-      throw new WorkspaceValidationFailure("A fresh attempt is unavailable for this workspace storage provider. The existing workspace is retained.", {
-        reason: "fresh_workspace_storage_unsupported",
-      });
+      const saved = freshWorkspaceSchema.safeParse(previous?.metadata?.workspaceProviderFresh ?? previous?.metadata?.runnerTaskFreshWorkspace);
+      providerFresh = saved.success && saved.data.attemptId === input.task.freshWorkspace.retryIntentId ? saved.data :
+        await stageProviderFreshWorkspace({ db, companyId: agent.companyId, issueId,
+          attemptId: input.task.freshWorkspace.retryIntentId, sourceRunId: input.task.freshWorkspace.sourceRunId,
+          previousWorkspaceId: previousProviderWorkspaceId });
     }
   }
   const pluginPrepared = isDotRun ? null : await preparePluginWorkspace(db, input.services.workspaceWorkers, {
     companyId: agent.companyId, projectId: resolvedWorkspace.projectId, projectWorkspaceId: resolvedWorkspace.workspaceId,
     issueId, runId: run.id, agentId: agent.id, responsibleUserId,
-    existingWorkspaceId: reusableExistingExecutionWorkspace?.id ?? issueRef?.executionWorkspaceId ?? null,
+    existingWorkspaceId: providerFresh ? providerFresh.previousWorkspaceId : reusableExistingExecutionWorkspace?.id ?? issueRef?.executionWorkspaceId ?? null,
+    ...(providerFresh ? { fresh: providerFresh, expectedBindingRevision: previousProviderBindingRevision } : {}),
     selectedProviderPluginId: projectExecutionWorkspacePolicy?.storageProviderPluginId ?? null,
     mode: requestedExecutionWorkspaceMode,
     strategy: resolveEffectiveWorkspaceStrategyType(requestedExecutionWorkspaceMode, mergedConfig),
@@ -401,6 +417,10 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     baseRef: typeof parseObject(mergedConfig.workspaceStrategy).baseRef === "string"
       ? String(parseObject(mergedConfig.workspaceStrategy).baseRef) : null,
   });
+  const freshTaskReservationId = providerFresh && pluginTaskWorkspace && !pluginPrepared && !resolvedWorkspace.projectId && issueId
+    ? await reserveFreshPluginTaskWorkspace({ db, companyId: agent.companyId, issueId, runId: run.id, agentId: agent.id,
+        fresh: providerFresh, expectedBindingRevision: previousProviderBindingRevision, owner: taskWorkspaceOwner! }) : null;
+  const freshTaskReservation = freshTaskReservationId ? await executionWorkspacesSvc.getById(freshTaskReservationId) : null;
   const copyOnlyProvisioning = pluginPrepared ? true : await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
     companyId: agent.companyId,
     task: issueRef ? { ...issueRef, workspaceSelection: input.task.workspaceSelection } : null,
@@ -560,7 +580,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       agentId: agent.id,
     },
   );
-  if (freshNeedsSeed && issueId) {
+  if (freshNeedsSeed && issueId && !pluginPrepared && !pluginTaskWorkspace) {
     await controllerLease.assertOwned();
     const verifySourceAccess = async () => {
       await assertTaskWorkspaceExecutionAccess(db, {
@@ -591,7 +611,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     warnings: [], created: false, branchCreatedByRuntime: false,
     baseRefSha: pluginPrepared.metadata?.workspaceProviderBaseSha as string | null,
   } as RealizedExecutionWorkspace, reusedExecutionWorkspace: Boolean(reusableExistingExecutionWorkspace), policy: workspaceReuseProvisioningPolicy }
-    : isDotRun || pluginTaskWorkspace ? { executionWorkspace: { ...executionWorkspaceBase, strategy: pluginTaskWorkspace ? latestWorkspaceStrategyType : "project_primary" as const, cwd: resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: pluginTaskWorkspace && workspaceReuseProvisioningPolicy.shouldRestoreExistingWorkspace && Boolean(reusableExistingExecutionWorkspace), policy: workspaceReuseProvisioningPolicy } : await timeWorkspace("workspace_provision", () => provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
+    : isDotRun || pluginTaskWorkspace ? { executionWorkspace: { ...executionWorkspaceBase, strategy: pluginTaskWorkspace ? latestWorkspaceStrategyType : "project_primary" as const, cwd: freshTaskReservation?.cwd ?? resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: pluginTaskWorkspace && workspaceReuseProvisioningPolicy.shouldRestoreExistingWorkspace && Boolean(reusableExistingExecutionWorkspace), policy: workspaceReuseProvisioningPolicy } : await timeWorkspace("workspace_provision", () => provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
     {
       requestedShouldReuseExisting,
       existingExecutionWorkspaceId:
@@ -696,9 +716,12 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     },
   ));
   if (input.task.freshWorkspace?.mode === "fresh_isolated_workspace" && issueId) {
-    const snapshots = await attachPreservedWorkspaceSnapshots({ db, companyId: agent.companyId,
-      issueId, sourceRunIds: [input.task.freshWorkspace.sourceRunId], cwd: executionWorkspace.cwd });
-    const recoveredFiles = snapshots.map(snapshot => ({ ...snapshot, path: path.relative(executionWorkspace.cwd, snapshot.path) }));
+    const recoveredFiles = providerFresh ? providerFresh.recoverySnapshots.map(snapshot => ({
+      operationId: snapshot.operationId, sourceRunId: snapshot.sourceRunId,
+      path: `.paperclip-recovered/${snapshot.operationId}`,
+    })) : (await attachPreservedWorkspaceSnapshots({ db, companyId: agent.companyId,
+      issueId, sourceRunIds: [input.task.freshWorkspace.sourceRunId], cwd: executionWorkspace.cwd }))
+      .map(snapshot => ({ ...snapshot, path: path.relative(executionWorkspace.cwd, snapshot.path) }));
     context.recoveredWorkspaceFiles = recoveredFiles;
     const continuation = context.executionContinuation as import("@paperclipai/shared").ExecutionContinuationEnvelope | null;
     if (continuation) {
@@ -841,6 +864,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     ...baseExecutionWorkspaceMetadata,
     ...(pluginPrepared?.metadata ?? {}),
     ...(taskWorkspaceOwner && !pluginPrepared ? { runnerTaskWorkspaceOwner: taskWorkspaceOwner } : {}),
+    ...(providerFresh && pluginTaskWorkspace && !pluginPrepared ? { runnerTaskFreshWorkspace: providerFresh } : {}),
     ...(copyOnlyProvisioning ? { [CONTROLLER_PROVISION_COPY_ONLY]: true } : {}),
     ...(persistedWorktreeInstanceRoot
       ? {
@@ -857,6 +881,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   try {
     persistedExecutionWorkspace =
       pluginPrepared ? await executionWorkspacesSvc.update(pluginPrepared.id, { metadata: nextExecutionWorkspaceMetadata }) :
+      freshTaskReservation ? await executionWorkspacesSvc.update(freshTaskReservation.id, { metadata: nextExecutionWorkspaceMetadata }) :
       resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
       reusableExistingExecutionWorkspace
         ? await timeWorkspace("workspace_record_update", () => executionWorkspacesSvc.update(

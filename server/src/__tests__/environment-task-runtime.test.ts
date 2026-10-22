@@ -33,6 +33,21 @@ beforeEach(() => {
   state.plugin = { id: "original", pluginKey: "test.provider", status: "ready", manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true }] } };
 });
 describe("plugin-provided Runner execution", () => {
+  it("forwards a retained fresh directory intent on later launch calls and checks provider support", async () => {
+    const value = row();
+    value.lease.metadata.runnerTaskProjectAuthValidation.projectIds = [];
+    const fresh = { attemptId: leaseId, sourceRunId: secondProjectId, previousWorkspaceId: null, recoverySnapshots: [] };
+    Object.assign(value.lease.metadata, { freshWorkspace: fresh });
+    Object.assign(state.plugin.manifestJson.environmentDrivers[0], { freshWorkspaceVersion: 1 });
+    const workers = worker();
+    await executeEnvironmentTask(database(value, []).db, workers as never, { companyId: "company", leaseId, operation: { ...submit, projectIds: [] } });
+    expect(workers.call).toHaveBeenCalledWith("original", "environmentTask", expect.objectContaining({ fresh }), 15_000);
+    delete state.plugin.manifestJson.environmentDrivers[0].freshWorkspaceVersion;
+    const denied = worker();
+    await expect(executeEnvironmentTask(database(value, []).db, denied as never, { companyId: "company", leaseId,
+      operation: { ...submit, projectIds: [] } })).rejects.toThrow("fresh workspace preparation unavailable");
+    expect(denied.call).not.toHaveBeenCalled();
+  });
   it("passes only the workspace binding pinned to this lease and provider", async () => {
     const value = row(); value.lease.metadata.runnerTaskProjectAuthValidation.projectIds = [];
     const binding = { pluginId: leaseId, projectId, executionWorkspaceId: secondProjectId, projectWorkspaceId: projectId,

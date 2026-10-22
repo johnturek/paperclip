@@ -20,6 +20,7 @@ import {
   workspaceProviderOperationSchema,
   type PluginWorkspaceOperation,
   type PluginWorkspaceParams,
+  type PluginFreshWorkspace,
 } from "@paperclipai/plugin-sdk";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
@@ -167,9 +168,11 @@ export async function preparePluginWorkspace(
     branchMode?: "create" | "existing";
     branchName?: string | null;
     baseRef?: string | null;
+    fresh?: PluginFreshWorkspace;
+    expectedBindingRevision?: number;
   },
 ) {
-  const [existing] = input.existingWorkspaceId
+  const [previous] = input.existingWorkspaceId
     ? await db
         .select()
         .from(executionWorkspaces)
@@ -180,6 +183,13 @@ export async function preparePluginWorkspace(
           ),
         )
     : [];
+  const [reservation] = input.fresh ? await db.select().from(executionWorkspaces).where(and(
+    eq(executionWorkspaces.companyId, input.companyId),
+    eq(executionWorkspaces.sourceIssueId, input.issueId!),
+    sql`${executionWorkspaces.metadata}#>>'{workspaceProviderFresh,attemptId}' = ${input.fresh.attemptId}`,
+  )).limit(1) : [];
+  const existing = input.fresh ? reservation : previous;
+  const prior = existing ?? previous;
   if (
     existing?.metadata?.workspaceProviderRetired === true ||
     existing?.metadata?.workspaceProviderRemoval
@@ -187,9 +197,10 @@ export async function preparePluginWorkspace(
     throw conflict("Workspace storage is retired or awaiting cleanup");
   if (!existing && (!input.projectId || !input.projectWorkspaceId)) return null;
   const saved = readWorkspaceProviderBinding(existing?.metadata);
-  const mode = existing?.mode ?? input.mode,
+  const priorBinding = readWorkspaceProviderBinding(prior?.metadata);
+  const mode = input.fresh ? "isolated_workspace" : existing?.mode ?? input.mode,
     strategy = existing?.strategyType ?? input.strategy;
-  const projectId = saved?.projectId ?? input.projectId;
+  const projectId = priorBinding?.projectId ?? input.projectId;
   const [project] = projectId
     ? await db
         .select()
@@ -201,8 +212,8 @@ export async function preparePluginWorkspace(
           ),
         )
     : [];
-  if (existing && existing.providerType !== "plugin" && !saved && !existing.metadata?.workspaceProviderOwner) return null;
-  const owner = saved?.pluginId ?? existing?.metadata?.workspaceProviderOwner ??
+  if (prior && prior.providerType !== "plugin" && !priorBinding && !prior.metadata?.workspaceProviderOwner) return null;
+  const owner = priorBinding?.pluginId ?? prior?.metadata?.workspaceProviderOwner ??
     (!existing && input.selectedProviderPluginId !== undefined ? input.selectedProviderPluginId :
       !existing && project ? (await effectiveProjectWorkspacePolicy(db, input.companyId, project.executionWorkspacePolicy, false))?.storageProviderPluginId : null);
   const pluginId = typeof owner === "string" ? owner : null;
@@ -238,6 +249,8 @@ export async function preparePluginWorkspace(
     pluginId,
   );
   const declaration = selectedProvider.manifestJson.workspaceProvider!;
+  if (input.fresh && declaration.freshWorkspaceVersion !== 1)
+    throw conflict("A fresh attempt is unavailable for this workspace storage provider. The existing workspace is retained.", { reason: "fresh_workspace_storage_unsupported" });
   if (
     !declaration.modes.includes(mode as "isolated_workspace") ||
     !declaration.strategies.includes(strategy as "git_worktree")
@@ -302,7 +315,7 @@ export async function preparePluginWorkspace(
       ),
     );
   if (!source) throw conflict("Workspace repository source is unavailable");
-  const sourceInput = (existing?.metadata?.workspaceProviderSource as
+  const sourceInput = (prior?.metadata?.workspaceProviderSource as
     | Extract<PluginWorkspaceOperation, { kind: "prepare" }>["source"]
     | undefined) ?? {
     id: source.id,
@@ -322,7 +335,7 @@ export async function preparePluginWorkspace(
     repoRef: existing?.baseRef ?? source.repoRef,
     defaultRef: source.defaultRef,
   };
-  const branchName = existing
+  const branchName = input.fresh ? null : existing
     ? existing.branchName
     : (input.branchName ??
       (strategy === "git_worktree" ? `workspace-${randomUUID()}` : null));
@@ -363,7 +376,7 @@ export async function preparePluginWorkspace(
           ),
         )
         .for("update");
-      if (!task || task.executionWorkspaceId)
+      if (!task || (input.fresh ? task.executionWorkspaceId !== input.fresh.previousWorkspaceId || task.workspaceBindingRevision !== input.expectedBindingRevision : Boolean(task.executionWorkspaceId)))
         throw conflict("Task workspace binding changed; retry preparation");
       const id = randomUUID();
       await notifyTerminalWorkspaceWork(tx, `workspace:${id}`);
@@ -375,8 +388,8 @@ export async function preparePluginWorkspace(
           projectId: project.id,
           projectWorkspaceId: source.id,
           sourceIssueId: input.issueId,
-          mode: input.mode,
-          strategyType: input.strategy,
+          mode,
+          strategyType: strategy,
           name: branchName ?? source.name,
           providerType: "plugin",
           providerRef: null,
@@ -388,7 +401,8 @@ export async function preparePluginWorkspace(
           metadata: {
             workspaceProviderOwner: pluginId,
             workspaceProviderSource: sourceInput,
-            workspaceProviderBranchMode: input.branchMode ?? "create",
+            workspaceProviderBranchMode: input.fresh ? "create" : input.branchMode ?? "create",
+            ...(input.fresh ? { workspaceProviderFresh: input.fresh } : {}),
           },
         })
         .returning();
@@ -437,7 +451,7 @@ export async function preparePluginWorkspace(
         source: sourceInput,
         mode: workspace.mode as "isolated_workspace",
         strategy: workspace.strategyType as "git_worktree",
-        branchName,
+        branchName: workspace.metadata?.workspaceProviderFresh ? null : branchName,
         branchMode:
           (workspace.metadata?.workspaceProviderBranchMode as
             | "create"
@@ -447,6 +461,7 @@ export async function preparePluginWorkspace(
           "create",
         baseRef: workspace.baseRef,
         existing: saved,
+        ...(workspace.metadata?.workspaceProviderFresh ? { fresh: workspace.metadata.workspaceProviderFresh as PluginFreshWorkspace } : {}),
       },
     });
     if (result.kind !== "prepared")
@@ -522,10 +537,11 @@ async function reconcilePluginWorkspaceReservation(
     source: workspace.metadata.workspaceProviderSource,
     mode: workspace.mode,
     strategy: workspace.strategyType,
-    branchName: workspace.branchName,
+    branchName: workspace.metadata.workspaceProviderFresh ? null : workspace.branchName,
     branchMode: workspace.metadata.workspaceProviderBranchMode ?? "create",
     baseRef: workspace.baseRef,
     existing: null,
+    ...(workspace.metadata?.workspaceProviderFresh ? { fresh: workspace.metadata.workspaceProviderFresh as PluginFreshWorkspace } : {}),
   });
   const result = await callWorkspaceProvider(db, workers, {
     workspace,

@@ -97,14 +97,16 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     return { input, source, issue, run, envOrchestrator };
   }
   it.each([
-    { inherited: false, mode: "isolated_workspace" as const },
-    { inherited: true, mode: "isolated_workspace" as const },
-    { inherited: true, mode: "operator_branch" as const },
-  ])("prepares managed storage before acquisition (inherited: $inherited, mode: $mode) without touching a Core checkout", async ({ inherited, mode: defaultMode }) => {
+    { inherited: false, mode: "isolated_workspace" as const, fresh: false },
+    { inherited: false, mode: "isolated_workspace" as const, fresh: true },
+    { inherited: true, mode: "isolated_workspace" as const, fresh: false },
+    { inherited: true, mode: "operator_branch" as const, fresh: false },
+  ])("prepares managed storage before acquisition (inherited: $inherited, mode: $mode, fresh: $fresh) without touching a Core checkout", async ({ inherited, mode: defaultMode, fresh }) => {
     const { input, source, issue } = await fixture(true);
-    const [plugin] = await db.insert(plugins).values({ pluginKey: "test.managed-storage", packageName: "test-storage", version: "1.0.0", apiVersion: 1, status: "ready", categories: ["workspace"],
-      manifestJson: { id: "test.managed-storage", apiVersion: 1, version: "1.0.0", displayName: "Storage", description: "Storage", author: "Test", categories: ["workspace"],
-        workspaceProvider: { modes: ["isolated_workspace", "operator_branch"], strategies: ["git_worktree"], ...(inherited ? { defaultForProjects: { mode: defaultMode, strategy: "git_worktree" as const } } : {}) }, capabilities: ["workspaces.manage", "events.subscribe"], resourceLifecycle: ["project"], entrypoints: { worker: "./worker.js" } } }).returning();
+    const pluginKey = `test.managed-storage-${inherited}-${defaultMode}-${fresh}`;
+    const [plugin] = await db.insert(plugins).values({ pluginKey, packageName: "test-storage", version: "1.0.0", apiVersion: 1, status: "ready", categories: ["workspace"],
+      manifestJson: { id: pluginKey, apiVersion: 1, version: "1.0.0", displayName: "Storage", description: "Storage", author: "Test", categories: ["workspace"],
+        workspaceProvider: { freshWorkspaceVersion: 1, modes: ["isolated_workspace", "operator_branch"], strategies: ["git_worktree"], ...(inherited ? { defaultForProjects: { mode: defaultMode, strategy: "git_worktree" as const } } : {}) }, capabilities: ["workspaces.manage", "events.subscribe"], resourceLifecycle: ["project"], entrypoints: { worker: "./worker.js" } } }).returning();
     const explicitPolicy = { enabled: true, storageProviderPluginId: plugin.id, defaultMode: "isolated_workspace" as const,
       workspaceStrategy: { type: "git_worktree" as const, baseRef: "main", branchTemplate: "test-{{issue.identifier}}" } };
     if (!inherited) await db.update(projects).set({ executionWorkspacePolicy: explicitPolicy }).where(eq(projects.id, issue.projectId!));
@@ -118,6 +120,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     }
     await db.update(projectWorkspaces).set({ cwd: null, sourceType: "remote_managed", repoUrl: "https://github.com/example/repo.git" }).where(eq(projectWorkspaces.id, issue.projectWorkspaceId!));
     await rm(source, { recursive: true });
+    if (fresh) input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id, sourceRunId: input.run.id, retainedSourceIds: [] };
     const sequence: string[] = [];
     input.services.workspaceWorkers = { getWorker: () => ({ supportedMethods: ["workspaceOperation"] }), call: async (_: string, __: string, params: any) => {
       sequence.push("prepare");
@@ -139,7 +142,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     await expect(access(source)).rejects.toThrow();
     const [task] = await db.select().from(issues).where(eq(issues.id, issue.id));
     const [workspace] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, task.executionWorkspaceId!));
-    expect(workspace).toMatchObject({ providerType: "plugin", cwd: null, mode: defaultMode, strategyType: "git_worktree", branchName: inherited ? "WSP-1-prepare-this-workspace" : "test-WSP-1" });
+    expect(workspace).toMatchObject({ providerType: "plugin", cwd: null, mode: defaultMode, strategyType: "git_worktree", branchName: fresh ? null : inherited ? "WSP-1-prepare-this-workspace" : "test-WSP-1" });
   });
   async function installDefault() {
     const [plugin] = await db.insert(plugins).values({ pluginKey: "test.default-storage", packageName: "test-storage", version: "1.0.0", status: "ready",
@@ -178,7 +181,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   const readRun = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
   const leases = (id: string) => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, id));
 
-  it("keeps plugin-owned storage untouched when a fresh attempt cannot import preserved files", async () => {
+  it("keeps plugin-owned storage untouched when a fresh attempt provider is unavailable", async () => {
     const { input, source, issue } = await fixture(true);
     await db.update(projects).set({ executionWorkspacePolicy: {
       enabled: true, storageProviderPluginId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -188,9 +191,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       sourceRunId: input.run.id, retainedSourceIds: [] };
     const call = vi.fn();
     input.services.workspaceWorkers = { getWorker: () => ({ supportedMethods: ["workspaceOperation"] }), call } as any;
-    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
-      resultJson: { reason: "fresh_workspace_storage_unsupported" },
-    });
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toThrow("workspace storage plugin is unavailable");
     expect(call).not.toHaveBeenCalled();
     expect(await leases(input.run.id)).toHaveLength(0);
     expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();

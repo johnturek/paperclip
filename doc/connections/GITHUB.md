@@ -178,6 +178,10 @@ It retains GitHub's destructive classification. Read tools include
 Provider references: [MCP toolset configuration](https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.md)
 and [workflow dispatch permissions](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event).
 
+GitHub response reconciliation reads run status and request identity without
+loading prompts, runtime profiles, results, or log excerpts. Request ownership
+checks still use current company, agent, task, and accepted message provenance.
+
 ## Webhook delivery recovery
 
 The Cloud connector authenticates the outer event batch before it processes

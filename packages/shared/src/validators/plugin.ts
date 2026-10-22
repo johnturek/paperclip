@@ -178,6 +178,7 @@ export type SandboxProviderCapabilitiesInput = z.infer<typeof sandboxProviderCap
 // (for example `supportsLoginPTY`) fails validation instead of dropping.
 export const pluginEnvironmentDriverDeclarationSchema = z.object({
   supportsTasks: z.boolean().optional(),
+  freshWorkspaceVersion: z.literal(1).optional(),
   driverKey: z.string().min(1).regex(
     /^[a-z0-9][a-z0-9._-]*$/,
     "Environment driver key must start with a lowercase alphanumeric and contain only lowercase letters, digits, dots, hyphens, or underscores",
@@ -791,6 +792,7 @@ export const pluginManifestV1Schema = z.object({
   capabilities: z.array(z.enum(PLUGIN_CAPABILITIES)).min(1),
   agentLifecycle: z.literal(true).optional(),
   workspaceProvider: z.object({
+    freshWorkspaceVersion: z.literal(1).optional(),
     modes: z.array(z.enum(["shared_workspace", "isolated_workspace", "operator_branch"])).min(1).max(3),
     strategies: z.array(z.enum(["project_primary", "git_worktree"])).min(1).max(2),
     defaultForProjects: z.object({

@@ -7,11 +7,14 @@ import { and, eq, ne, sql } from "drizzle-orm";
 import { executionWorkspaces, issues, heartbeatRuns, nativeRunFinalizations, environmentLeases,
   workspaceRuntimeServices, issueRecoveryActions, projectWorkspaces, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import { createGitRemoteAuthProvider } from "./git-credentials.js";
+import type { StorageService } from "../storage/types.js";
+import { currentRestorePointSnapshot, RestorePointSkip, type RestorePointLimits } from "./git-restore-point.js";
+import { abandonGitRestorePoint, abandonGitRestorePointById, activateGitRestorePoint, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
 import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 import { managedProjectCheckoutName } from "./managed-project-checkout-name.js";
 import type { GitRemoteAuthProvider } from "./git-credentials.js";
-import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, assertReproducibleManagedCheckout, inspectGitCacheRecipe, readGitCacheRestoration,
-  verifyRemoteGitCommit, gitCacheExpirationLockLocations, recoverGitCacheExpirationLocks, GitCacheRestorationFailure, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
+import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, assertReproducibleManagedCheckout, inspectGitCacheRecipe, inspectGitCacheRecipeForRestorePoint, readGitCacheRestoration, GIT_CACHE_RESTORATION_SCHEMA_V2,
+  verifyRemoteGitCommit, gitCacheExpirationLockLocations, recoverGitCacheExpirationLocks, GitCacheRestorationFailure, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, type GitCacheRestoration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
 
 async function allocatedBytes(target: string, shouldContinue: () => boolean): Promise<number> {
   if (!shouldContinue()) throw new Error("scan_stopped");
@@ -41,7 +44,29 @@ type Workspace = typeof executionWorkspaces.$inferSelect;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Expiration = GitCacheExpiration;
 export type GitExpirationResult = { candidate: boolean; expired: boolean; reclaimedBytes: number;
-  candidateBytes: number; baseExpired: boolean; skipReason: string | null };
+  candidateBytes: number; baseExpired: boolean; skipReason: string | null; restorePoint: boolean };
+
+export type GitRestorePointExpirationOptions = {
+  storage: StorageService;
+  notBefore: Date;
+  keyDurable: boolean;
+  limits?: Partial<RestorePointLimits>;
+};
+
+const RESTORE_POINT_RELAXABLE = new Set(["dirty_or_untracked_files", "unique_ignored_files", "unique_original_head",
+  "unique_reflog_commits", "upstream_commit_unverified"]);
+
+async function restorePointBoundary(recipe: GitCacheRestoration, headOnRemote: boolean, auth: GitRemoteAuthProvider, signal?: AbortSignal) {
+  if (headOnRemote) return [recipe.commit];
+  const upstream = await gitCacheCommand(recipe.worktreePath, ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD"], signal)
+    .catch(() => "");
+  const tip = upstream.trim();
+  if (!tip) return [];
+  const base = (await gitCacheCommand(recipe.worktreePath, ["merge-base", "HEAD", tip], signal).catch(() => "")).trim();
+  if (!/^[a-f0-9]{40}$/.test(base)) return [];
+  try { await verifyRemoteGitCommit(recipe.repoUrl, base, auth, signal); return [base]; }
+  catch (error) { if (signal?.aborted) throw error; return []; }
+}
 
 /** Re-read the whole tree and every runtime/recovery consumer immediately before deletion. */
 export async function isGitWorkspaceExpirationEligible(tx: Tx, workspace: Workspace, now: Date) {
@@ -156,9 +181,11 @@ function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuth
 export async function expireReconstructableGitWorkspace(db: Db, snapshot: Workspace, options: {
   dryRun: boolean; expireBase: boolean; now: Date; signal?: AbortSignal;
   beforeDelete?: (workspace: Workspace) => Promise<void>;
+  restorePoint?: GitRestorePointExpirationOptions;
 }): Promise<GitExpirationResult> {
   const result: GitExpirationResult = { candidate: false, expired: false, reclaimedBytes: 0,
-    candidateBytes: 0, baseExpired: false, skipReason: null };
+    candidateBytes: 0, baseExpired: false, skipReason: null, restorePoint: false };
+  let pendingRestorePoint: string | null = null;
   if (!snapshot.sourceIssueId) return { ...result, skipReason: "missing_source_issue" };
   try {
     return await withIsolatedRepositorySourceLock(db, snapshot.companyId, snapshot.sourceIssueId, () =>
@@ -176,8 +203,24 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         const checkouts = new Map<string, ManagedCheckoutContents>();
         const identity = { companyId: workspace.companyId, workspaceId: workspace.id };
         const proveManagedCheckout = managedCheckoutProver(db, workspace, auth, checkouts);
-        let recipe = state ? readGitCacheRestoration(workspace)! : await inspectGitCacheRecipe(workspace,
-          auth, options.signal, { proveManagedCheckout });
+        let headOnRemote = true;
+        let needsRestorePoint = false;
+        let recipe: GitCacheRestoration;
+        if (state) recipe = readGitCacheRestoration(workspace)!;
+        else {
+          try { recipe = await inspectGitCacheRecipe(workspace, auth, options.signal, { proveManagedCheckout }); }
+          catch (error) {
+            if (!options.restorePoint || !RESTORE_POINT_RELAXABLE.has(skipReason(error))) throw error;
+            if (options.now.getTime() < options.restorePoint.notBefore.getTime()) throw new Error("restore_point_not_due");
+            if (!options.restorePoint.keyDurable) throw new Error("restore_point_key_not_durable");
+            checkouts.clear();
+            const inspected = await inspectGitCacheRecipeForRestorePoint(workspace, auth, options.signal, { proveManagedCheckout });
+            recipe = inspected.recipe;
+            headOnRemote = inspected.headOnRemote;
+            needsRestorePoint = true;
+            result.restorePoint = true;
+          }
+        }
         if (!state) recipe.contents = await captureGitWorkspaceContents(recipe.worktreePath, identity, [...checkouts.values()]);
         const present = await exists(recipe.worktreePath);
         if (!state && !present) throw new Error("missing_unverified_worktree");
@@ -199,16 +242,34 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           if (await fs.realpath(worktreeAdmin) !== canonicalAdmin || await fs.realpath(rawAdmin) !== canonicalAdmin) {
             throw new Error("unproven_worktree_admin");
           }
+          let activateLedger: string | null = null;
+          if (needsRestorePoint) {
+            const stored = await storeGitRestorePoint({ db, storage: options.restorePoint!.storage,
+              workspace: { companyId: workspace.companyId, id: workspace.id, sourceIssueId: workspace.sourceIssueId },
+              cwd: recipe.worktreePath, generation, headOnRemote, limits: options.restorePoint!.limits, signal: options.signal,
+              upstreamCommits: await restorePointBoundary(recipe, headOnRemote, auth, options.signal) });
+            if (stored) {
+              pendingRestorePoint = stored.ledgerId;
+              activateLedger = stored.ledgerId;
+              recipe = { ...recipe, schema: GIT_CACHE_RESTORATION_SCHEMA_V2, restorePoint: stored.ref };
+            } else if (!headOnRemote) throw new Error("upstream_commit_unverified");
+          }
           state = { schema: "paperclip.git-cache-expiration.v1", generation, workspaceRemoved: false,
             worktreeTrash: path.join(path.dirname(recipe.worktreePath), `.expired-git-worktree-${workspace.id}-${generation}`),
             worktreeAdmin, baseTrash: null, completed: false, lockToken: randomBytes(32).toString("hex") };
           if (await exists(state.worktreeTrash)) throw new Error("unknown_worktree_trash");
           // Commit the immutable restoration recipe BEFORE touching disk. The separate
           // lifecycle-lock connection remains held through deletion and final state.
-          [workspace] = await db.update(executionWorkspaces).set({ status: "archived", closedAt: options.now,
+          const archive = { status: "archived", closedAt: options.now,
             cleanupEligibleAt: options.now, cleanupReason: GIT_CACHE_EXPIRATION_REASON, updatedAt: options.now,
             metadata: { ...workspace.metadata, lifecycleGeneration: generation, [GIT_CACHE_RESTORATION_KEY]: recipe, [EXPIRATION_KEY]: state },
-          }).where(eq(executionWorkspaces.id, workspace.id)).returning();
+          };
+          [workspace] = await db.transaction(async (archiveTx) => {
+            const rows = await archiveTx.update(executionWorkspaces).set(archive).where(eq(executionWorkspaces.id, workspace!.id)).returning();
+            if (activateLedger) await activateGitRestorePoint(archiveTx, { ledgerId: activateLedger, workspaceId: workspace!.id, at: options.now });
+            return rows;
+          });
+          pendingRestorePoint = null;
         }
         if (!workspace) throw new Error("workspace_changed");
         const persist = async () => {
@@ -229,7 +290,10 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
             try {
               checkouts.clear();
               await assertReproducibleGitFiles(recipe.worktreePath, options.signal, { proveManagedCheckout, preserveSettings: true,
+                restorePoint: Boolean(recipe.restorePoint),
                 verifyFetchedCommit: (commit, signal) => verifyRemoteGitCommit(recipe.repoUrl, commit, auth, signal) });
+              if (recipe.restorePoint && !restorePointSnapshotMatches(recipe.restorePoint,
+                await currentRestorePointSnapshot(recipe.worktreePath, options.signal))) throw new Error("restore_point_contents_changed");
               for (const checkout of checkouts.values()) {
                 const cwd = path.join(recipe.worktreePath, ".paperclip-repositories", checkout.name);
                 locks.push(await acquireGitExpirationLocks(lockLocations.filter(location => location.checkout === checkout.name), state.lockToken));
@@ -241,11 +305,13 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
               if ((await gitCacheCommand(recipe.worktreePath, ["rev-parse", "HEAD"], options.signal)).trim() !== recipe.commit) throw new Error("head_changed");
             } catch (error) {
               for (const lock of [...locks].reverse()) await lock.release();
+              const { restorePoint: _abandoned, ...reproducible } = recipe;
               const metadata: Record<string, unknown> = { ...workspace.metadata, lifecycleGeneration: state.generation + 1,
-                [GIT_CACHE_RESTORATION_KEY]: { ...recipe, restoredAt: new Date().toISOString() } };
+                [GIT_CACHE_RESTORATION_KEY]: { ...reproducible, schema: "paperclip.git-cache-restoration.v1", restoredAt: new Date().toISOString() } };
               delete metadata[EXPIRATION_KEY];
               await db.update(executionWorkspaces).set({ status: "active", closedAt: null, cleanupEligibleAt: null,
                 cleanupReason: null, metadata, updatedAt: new Date() }).where(eq(executionWorkspaces.id, workspace.id));
+              if (recipe.restorePoint) await abandonGitRestorePointById(db, workspace.id, recipe.restorePoint.objectKey);
               throw error;
             }
             await fs.rename(recipe.worktreePath, state.worktreeTrash);
@@ -284,8 +350,9 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         return result;
       })), true);
   } catch (error) {
+    if (pendingRestorePoint) await abandonGitRestorePoint(db, pendingRestorePoint).catch(() => undefined);
     options.signal?.throwIfAborted();
-    result.skipReason = skipReason(error);
+    result.skipReason = error instanceof RestorePointSkip ? error.reason : skipReason(error);
     return result;
   }
 }

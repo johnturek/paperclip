@@ -97,7 +97,12 @@ makes an earlier ordinary question historical, without answering, cancelling,
 or accepting it. Agent-authored, run-attributed, derived-agent, and untrusted
 comments do not establish that direction. The server uses the same question
 classification in task context, completion feedback, governed waits, and native
-status finalization. Browser dismissal remains a local presentation preference.
+status finalization. Human dismissal is persisted on saved interactions.
+Dismissed ordinary confirmations, completion reviews, choices, suggested tasks,
+and item verdicts also cease to gate completion. They remain pending until
+explicitly decided or expired by task completion. Dismissal never authorizes a
+tool, secret, connection, document approval, company-enforced restriction, or
+configured review stage; agents retain those gates without repeating reminders.
 
 A historical question stays in the feed and remains answerable after completion.
 A later authorized human answer updates history without reopening or resuming

@@ -2598,6 +2598,13 @@
       "when": 1792707356696,
       "tag": "0372_mature_the_initiative",
       "breakpoints": true
+    },
+    {
+      "idx": 373,
+      "version": "7",
+      "when": 1792710084082,
+      "tag": "0373_wandering_mongu",
+      "breakpoints": true
     }
   ]
 }

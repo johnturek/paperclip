@@ -95,6 +95,40 @@ bytes, cleared task sessions, and skip reasons.
 
 ## Git workspace restore points
 
+Git cache expiration (`PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED=true`) normally removes a
+closed issue's worktree only when its remote can reproduce it exactly. With
+`PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=true`, it can also remove a worktree that has
+unpushed commits, uncommitted or untracked files, or history-only commits, once its issue
+tree has been closed for `PAPERCLIP_GIT_RESTORE_POINT_TERMINAL_DELAY_DAYS` (default `3`).
+Before removal it saves a restore point:
+
+- a git bundle of commits the remote does not have, against a remote-verified base,
+  including commits only reachable from the reflog or `ORIG_HEAD`;
+- deterministic snapshots of the index and working tree, including untracked files and
+  non-default file modes. Ignored files are left out, and so are untracked `.env` and
+  `.env.*` files, which provisioning recreates with current secrets.
+
+The restore point is encrypted with a per-restore-point key wrapped by the instance
+secrets key, uploaded to file storage, read back and hash-checked, then activated in
+the same transaction that archives the workspace with a versioned recipe
+(`paperclip.git-cache-restoration.v2`). Older servers reject that recipe instead of
+restoring without the saved work. Under the expiration locks, the worktree must still
+match the captured snapshot exactly; otherwise expiration rolls back, keeps the
+worktree, and drops the restore point. Nested managed checkouts, submodules, special
+git state and ignored files other than `.env` still keep a worktree from expiring.
+Restore points are refused when the file storage is `s3` and the secrets master key
+does not come from `PAPERCLIP_SECRETS_MASTER_KEY`.
+
+Reopening the issue, or the next run that recreates the worktree, imports the bundle,
+re-adds the worktree at the saved commit, applies the restore point and verifies the
+result. The bundle is always imported, so history-only commits are present again as
+objects in the repository; they are not recreated as branches or reflog entries, and the
+restore point keeps them until it expires. A draft commit message left by an aborted
+commit still keeps the worktree from expiring, because restore points do not save it. A worktree that already matches is only marked applied, and a worktree that
+diverged is never overwritten: the restore fails closed and can be retried. A missing,
+corrupt or expired restore point also fails closed.
+
+
 Restore points are encrypted saves of the parts of a git worktree that its remote
 cannot reproduce: unpushed commits and uncommitted files. They let a closed issue's
 worktree be removed and restored later. The table `execution_workspace_restore_points`

@@ -1886,24 +1886,27 @@ Required UX behaviors:
 - conflict toasts on atomic checkout failure
 - no silent background failures; every failed run visible in UI
 
-Regular task chats and Agent Chat keep unanswered questions as compact,
-reopenable entries at their original position in the feed. Dismissing a question
-or sending a newer message clears its form from the composer without resolving
-the saved question. Questions do not contribute to composer pending counts.
-Dismissal persists locally for the person and task across reloads; reopening
-restores the original form and draft. Approval and permission gates are unchanged.
+Regular task chats and Agent Chat keep requests as compact, reopenable entries
+at their original position in the feed. Dismissing any composer request clears
+its form and pending reminder, including completion reviews, confirmations,
+checkbox choices, suggested tasks, item verdicts, and runtime requests. Saved
+interactions persist `dismissedAt` and `dismissedByUserId` through a board-only,
+company-scoped endpoint with task-access, resolver-audience, and current review-policy
+checks and an activity record. Review policy is checked under the task-row lock.
+Dismissal never creates an answer, decision, execution, or continuation wake.
+Raw runtime requests retain browser-local dismissal; reopening restores the
+original request and draft. A failed save leaves the request open with an error.
 
-A saved ordinary question becomes historical when a newer human task message
-moves it out of the current composer. Agent context, completion feedback, and
-native finalization apply the same rule. The historical question remains pending
-and answerable, including after completion; a later human answer records history
-without reopening the task or waking its agent. Its presence alone does not
-request another answer or prevent completion. Cancellation still expires pending
-questions. Agents continue work that does not need the missing input and withdraw
-obsolete questions when later evidence satisfies them. A real current input
-blocker must identify what is still needed. Approval, permission, connection,
-and configured review gates remain active. No server-side UI dismissal record
-is required.
+A saved ordinary question becomes historical after a newer human task message
+or explicit human dismissal. It remains answerable after completion without
+reopening work or waking the agent. Dismissed ordinary requests, including native
+completion reviews, no longer gate task completion; completion expires their
+non-question cards through the existing lifecycle. Cancellation still expires
+all pending requests. Agents must not repeat reminders for dismissed requests.
+Tool actions, secret proposals, connection authorization, company-enforced
+resolver restrictions, document/plan approvals, and separately configured review
+stages retain their authority gates. Dismissal does not authorize their actions;
+agents continue independent work without repeating the deferred request.
 
 ## 15. Operational Requirements
 

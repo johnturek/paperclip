@@ -1,3 +1,4 @@
+import { stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
 import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { settlePluginTaskCredentialHandoff } from "./plugin-task-credential-writeback.js";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
@@ -105,9 +106,14 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
       throw new Error("Managed workspace execution binding changed");
     }
   }
-  const freshWorkspace = metadata.freshWorkspace === undefined ? undefined : freshWorkspaceSchema.parse(metadata.freshWorkspace);
+  let freshWorkspace = metadata.freshWorkspace === undefined ? undefined : freshWorkspaceSchema.parse(metadata.freshWorkspace);
   if (freshWorkspace && driver.freshWorkspaceVersion !== 1 && (launches || operation.kind === "describe" || operation.kind === "check_project_auth"))
     throw new Error("Plugin-provided fresh workspace preparation unavailable");
+  if (freshWorkspace && operation.kind === "prepare") {
+    if (!lease.issueId) throw new Error("Fresh workspace task ownership is missing");
+    freshWorkspace = await stageProviderFreshWorkspace({ db, companyId: input.companyId,
+      issueId: lease.issueId, ...freshWorkspace, existing: freshWorkspace });
+  }
   const projectIds = scopesProjects ? operation.projectIds : [];
   if (activeProbe && projectIds.length > 0) throw new Error("Plugin Runner probe cannot use project mounts");
   if (projectIds.length > 0) {

@@ -1,4 +1,5 @@
 import { effectiveProjectWorkspacePolicy, isWorkspaceProvider } from "./project-workspace-provider.js";
+import { stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
 import { randomUUID, createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -86,13 +87,20 @@ export async function callWorkspaceProvider(
   const pluginId = binding?.pluginId ?? input.pluginId;
   if (!pluginId || !workspace.projectId)
     throw conflict("Workspace storage ownership is missing");
-  await provider(db, workers, workspace.companyId, pluginId);
+  const selectedProvider = await provider(db, workers, workspace.companyId, pluginId);
+  if (input.operation.kind === "prepare" && input.operation.fresh && selectedProvider.manifestJson.workspaceProvider?.freshWorkspaceVersion !== 1)
+    throw conflict("Fresh workspace preparation is unavailable");
   const generation =
     typeof workspace.metadata?.lifecycleGeneration === "number"
       ? workspace.metadata.lifecycleGeneration
       : 0;
   const operationGeneration = generation + (input.advanceGeneration ? 1 : 0);
   const operation = workspaceProviderOperationSchema.parse(input.operation);
+  if (operation.kind === "prepare" && operation.fresh) {
+    if (!workspace.sourceIssueId) throw conflict("Fresh workspace task ownership is missing");
+    operation.fresh = await stageProviderFreshWorkspace({ db, companyId: workspace.companyId,
+      issueId: workspace.sourceIssueId, ...operation.fresh, existing: operation.fresh });
+  }
   const params: PluginWorkspaceParams = {
     pluginId,
     companyId: workspace.companyId,
@@ -871,10 +879,11 @@ export async function restorePluginWorkspace(
     source,
     mode: workspace.mode,
     strategy: workspace.strategyType,
-    branchName: workspace.branchName,
-    branchMode: "existing",
+    branchName: workspace.metadata?.workspaceProviderFresh ? null : workspace.branchName,
+    branchMode: workspace.metadata?.workspaceProviderFresh ? "create" : "existing",
     baseRef: workspace.baseRef,
     existing: binding,
+    ...(workspace.metadata?.workspaceProviderFresh ? { fresh: workspace.metadata.workspaceProviderFresh as PluginFreshWorkspace } : {}),
   });
   const [pending] = await db.transaction(async (tx) => {
     await notifyTerminalWorkspaceWork(tx, `workspace:${workspace.id}`);

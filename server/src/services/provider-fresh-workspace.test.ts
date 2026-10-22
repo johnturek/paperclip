@@ -25,11 +25,13 @@ describe("fresh provider recovery transfer staging", () => {
     const first = await stageProviderFreshWorkspace(input);
     expect(first.recoverySnapshots).toHaveLength(1);
     expect(await readFile(first.recoverySnapshots[0].archive.path)).toEqual(archive);
-    expect(await stageProviderFreshWorkspace(input)).toEqual(first);
-    expect(state.getObject).toHaveBeenCalledTimes(2);
+    expect(await stageProviderFreshWorkspace({ ...input, existing: first })).toEqual(first);
+    await rm(first.recoverySnapshots[0].archive.path);
+    expect(await stageProviderFreshWorkspace({ ...input, existing: first })).toEqual(first);
+    expect(state.getObject).toHaveBeenCalledTimes(3);
     await chmod(first.recoverySnapshots[0].archive.path, 0o600);
     await writeFile(first.recoverySnapshots[0].archive.path, "corrupt");
     await expect(stageProviderFreshWorkspace(input)).rejects.toThrow();
-    expect(state.getObject).toHaveBeenCalledTimes(2);
+    expect(state.getObject).toHaveBeenCalledTimes(3);
   });
 });

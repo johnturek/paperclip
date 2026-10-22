@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
 import { and, eq } from "drizzle-orm";
 import { executionWorkspaces, heartbeatRuns, issues, workspaceOperations, type Db } from "@paperclipai/db";
 import { freshWorkspaceSchema, type PluginFreshWorkspace } from "@paperclipai/plugin-sdk";
@@ -17,10 +18,11 @@ import { SystemRecoveryFailure } from "./system-recovery-state.js";
 
 export async function stageProviderFreshWorkspace(input: {
   db: Db; companyId: string; issueId: string; attemptId: string; sourceRunId: string;
-  previousWorkspaceId: string | null;
+  previousWorkspaceId: string | null; existing?: PluginFreshWorkspace;
 }): Promise<PluginFreshWorkspace> {
   const fresh: PluginFreshWorkspace = freshWorkspaceSchema.parse({ attemptId: input.attemptId,
     sourceRunId: input.sourceRunId, previousWorkspaceId: input.previousWorkspaceId, recoverySnapshots: [] });
+  if (input.existing?.recoverySnapshots.length === 0) return freshWorkspaceSchema.parse(input.existing);
   const storage = getStorageService();
   const sources = await recoveryRunAncestry({ ...input, sourceRunIds: [input.sourceRunId] });
   const stagingRoot = path.join(resolvePaperclipInstanceRoot(), "runtime", "provider-recovery", input.companyId, fresh.attemptId);
@@ -32,6 +34,7 @@ export async function stageProviderFreshWorkspace(input: {
       eq(workspaceOperations.heartbeatRunId, sourceRunId), eq(workspaceOperations.phase, "workspace_recovery_snapshot"),
       eq(workspaceOperations.status, "succeeded")));
     for (const operation of operations) {
+      if (input.existing && !input.existing.recoverySnapshots.some(snapshot => snapshot.operationId === operation.id)) continue;
       const saved = readSnapshot(operation.metadata, input.companyId, sourceRunId);
       const directory = path.join(root, operation.id);
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -50,7 +53,12 @@ export async function stageProviderFreshWorkspace(input: {
           const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
           const object = await storage.getObject(input.companyId, expected.objectKey);
           try {
-            await pipeline(object.stream, createWriteStream(temporary, { flags: "wx", mode: 0o400 }));
+            let received = 0;
+            const bounded = new Transform({ transform(bytes, _encoding, callback) {
+              received += bytes.length;
+              callback(received > expected.byteSize ? new SystemRecoveryFailure("snapshot_verification_failed", "service_required") : null, bytes);
+            } });
+            await pipeline(object.stream, bounded, createWriteStream(temporary, { flags: "wx", mode: 0o400 }));
             await verify(temporary, expected);
             await rename(temporary, destination);
           } finally { object.stream.destroy(); await rm(temporary, { force: true }); }
@@ -62,6 +70,8 @@ export async function stageProviderFreshWorkspace(input: {
     }
   }
   fresh.recoverySnapshots.sort((a, b) => a.operationId.localeCompare(b.operationId));
+  if (input.existing && !isDeepStrictEqual(fresh, input.existing))
+    throw new SystemRecoveryFailure("snapshot_verification_failed", "service_required");
   return fresh;
 }
 

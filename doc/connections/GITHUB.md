@@ -187,7 +187,9 @@ checks still use current company, agent, task, and accepted message provenance.
 The Cloud connector authenticates the outer event batch before it processes
 individual encrypted App deliveries. If an inner delivery cannot be decrypted
 or fails its route binding check, the instance reports a failed delivery and
-leaves it unacknowledged in Cloud. Other valid events in the batch can still
+leaves it unacknowledged in Cloud. A local warning includes the authenticated
+delivery ID and a fixed failure reason, without event contents or raw errors.
+Other valid events in the batch can still
 finish and acknowledge independently. Failed ciphertext never reaches the
 GitHub webhook handler. The broker retains failed deliveries for retry under
 its normal lease and retention policy; this does not recover a lost old key.

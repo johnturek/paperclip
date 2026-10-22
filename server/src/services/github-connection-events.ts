@@ -535,6 +535,10 @@ export function githubConnectionEventService(
           deliveryIds: acknowledge,
         });
       }
+      for (const deliveryId of lease.failedEventIds ?? []) {
+        logger.warn({ deliveryId, reason: "inner_event_authentication_failed" },
+          "GitHub connector event retained for retry");
+      }
       return result;
     },
   };

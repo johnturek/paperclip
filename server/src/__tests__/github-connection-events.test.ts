@@ -13,6 +13,7 @@ import {
 import { eq } from "drizzle-orm";
 import { githubConnectionEventService } from "../services/github-connection-events.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+import { logger } from "../middleware/logger.js";
 import type { PaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -150,7 +151,12 @@ describeEmbeddedPostgres("GitHub connection event delivery", () => {
     let currentTime = new Date("2026-09-04T12:00:05.000Z");
     const service = githubConnectionEventService(db, { connector, now: () => currentTime });
 
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     await expect(service.pollOnce()).resolves.toMatchObject({ leased: 2, processed: 1, duplicate: 0, failed: 1 });
+    expect(warning.mock.calls).toEqual([[{
+      deliveryId: "undecryptable-delivery", reason: "inner_event_authentication_failed",
+    }, "GitHub connector event retained for retry"]]);
+    warning.mockRestore();
     const [snapshot] = await db.select().from(externalObjects).where(eq(externalObjects.id, externalObjectId));
     expect(snapshot).toMatchObject({
       statusKey: "merged",

@@ -45,7 +45,7 @@ describeEmbeddedPostgres("GitHub connection event delivery", () => {
     await tempDb?.cleanup();
   });
 
-  it("applies a normalized merged PR once, updates the snapshot, and acknowledges Cloud", async () => {
+  it("applies a normalized merged PR once while retaining undecryptable siblings for retry", async () => {
     const companyId = randomUUID();
     const userId = `github-owner-${randomUUID()}`;
     const applicationId = randomUUID();
@@ -144,13 +144,13 @@ describeEmbeddedPostgres("GitHub connection event delivery", () => {
       refresh: vi.fn(),
       revoke: vi.fn(),
       setWebhookBinding: vi.fn(async () => undefined),
-      leaseEvents: vi.fn(async () => ({ leaseId: `lease-${++poll}`, events: [leasedEvent] })),
+      leaseEvents: vi.fn(async () => ({ leaseId: `lease-${++poll}`, events: [leasedEvent], failedEventIds: ["undecryptable-delivery"] })),
       acknowledgeEvents: vi.fn(async () => 1),
     } as unknown as PaperclipCloudConnector;
     let currentTime = new Date("2026-09-04T12:00:05.000Z");
     const service = githubConnectionEventService(db, { connector, now: () => currentTime });
 
-    await expect(service.pollOnce()).resolves.toMatchObject({ leased: 1, processed: 1, duplicate: 0, failed: 0 });
+    await expect(service.pollOnce()).resolves.toMatchObject({ leased: 2, processed: 1, duplicate: 0, failed: 1 });
     const [snapshot] = await db.select().from(externalObjects).where(eq(externalObjects.id, externalObjectId));
     expect(snapshot).toMatchObject({
       statusKey: "merged",
@@ -196,14 +196,26 @@ describeEmbeddedPostgres("GitHub connection event delivery", () => {
       repositoryId: "99",
     });
     expect(connector.acknowledgeEvents).toHaveBeenCalledTimes(1);
+    expect(connector.acknowledgeEvents).toHaveBeenLastCalledWith(expect.objectContaining({
+      deliveryIds: [leasedEvent.id],
+    }));
+    expect(await db.select().from(connectionEventDeliveries).where(eq(
+      connectionEventDeliveries.providerDeliveryId, "undecryptable-delivery",
+    ))).toEqual([]);
 
     currentTime = new Date(currentTime.getTime() + 6_000);
-    await expect(service.pollOnce()).resolves.toMatchObject({ leased: 1, processed: 0, duplicate: 1, failed: 0 });
+    await expect(service.pollOnce()).resolves.toMatchObject({ leased: 2, processed: 0, duplicate: 1, failed: 1 });
     const [duplicateReceipt] = await db.select().from(connectionEventDeliveries).where(eq(
       connectionEventDeliveries.providerDeliveryId,
       leasedEvent.id,
     ));
     expect(duplicateReceipt?.attempts).toBe(1);
+    expect(connector.acknowledgeEvents).toHaveBeenCalledTimes(2);
+    vi.mocked(connector.leaseEvents).mockResolvedValue({
+      leaseId: "failed-only", events: [], failedEventIds: ["undecryptable-delivery"],
+    });
+    currentTime = new Date(currentTime.getTime() + 6_000);
+    await expect(service.pollOnce()).resolves.toMatchObject({ leased: 1, processed: 0, failed: 1 });
     expect(connector.acknowledgeEvents).toHaveBeenCalledTimes(2);
   });
 

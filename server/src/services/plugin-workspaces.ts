@@ -725,6 +725,8 @@ async function finishPendingRemoval(
   });
   if (result.kind !== "removed")
     throw conflict("Workspace removal is incomplete");
+  if (workspace.metadata?.workspaceProviderFresh)
+    await releaseProviderRecoveryTransfers(workspace.companyId, workspace.metadata.workspaceProviderFresh as PluginFreshWorkspace);
   const [updated] = await db.transaction(async (tx) => {
     await notifyTerminalWorkspaceWork(tx, `workspace:${workspace.id}`);
     return tx
@@ -751,8 +753,6 @@ async function finishPendingRemoval(
   });
   if (!updated)
     throw conflict("Workspace changed during removal reconciliation");
-  if (updated.metadata?.workspaceProviderFresh)
-    await releaseProviderRecoveryTransfers(updated.companyId, updated.metadata.workspaceProviderFresh as PluginFreshWorkspace);
   return updated;
 }
 

@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { createDb, executionWorkspaces, heartbeatRuns, issues, plugins } from "@paperclipai/db";
-import { preparePluginWorkspace } from "../services/plugin-workspaces.js";
+import { preparePluginWorkspace, removePluginWorkspace } from "../services/plugin-workspaces.js";
 import { reserveFreshPluginTaskWorkspace } from "../services/provider-fresh-workspace.js";
 import { createPluginWorkspaceFixture } from "./helpers/plugin-workspaces.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
+const cache = vi.hoisted(() => ({ release: vi.fn() }));
+vi.mock("../services/provider-fresh-workspace.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../services/provider-fresh-workspace.js")>(),
+  releaseProviderRecoveryTransfers: cache.release,
+}));
 const support = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)("provider-owned fresh retry reservations", () => {
   let db: ReturnType<typeof createDb>, stopDb: (() => Promise<void>) | undefined;
@@ -15,6 +20,7 @@ describe.skipIf(!support.supported)("provider-owned fresh retry reservations", (
     db = createDb(started.connectionString); stopDb = started.stop;
   });
   afterAll(async () => { await db?.$client.end(); await stopDb?.(); });
+  beforeEach(() => { cache.release.mockReset().mockResolvedValue(undefined); });
   async function fixture() {
     const f = await createPluginWorkspaceFixture(db);
     const previous = await preparePluginWorkspace(db, f.workers, f.input);
@@ -49,6 +55,21 @@ describe.skipIf(!support.supported)("provider-owned fresh retry reservations", (
     expect(retained.metadata).toEqual(f.previous.metadata);
     const rows = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.companyId, f.companyId));
     expect(rows).toHaveLength(2);
+  });
+  it("retains the durable removal intent if transfer cache cleanup fails", async () => {
+    const f = await fixture(); await enable(f.pluginId);
+    const workspace = await preparePluginWorkspace(db, f.workers, f.input);
+    const [closed] = await db.update(executionWorkspaces).set({ status: "archived" })
+      .where(eq(executionWorkspaces.id, workspace!.id)).returning();
+    cache.release.mockRejectedValueOnce(new Error("temporary cache cleanup failure"));
+    await expect(removePluginWorkspace(db, f.workers, closed, "a".repeat(40))).rejects.toThrow("cache cleanup failure");
+    const [pending] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, workspace!.id));
+    expect(pending.metadata?.workspaceProviderRemoval).toBeTruthy();
+    expect(pending.metadata?.workspaceProviderRemoved).not.toBe(true);
+    await removePluginWorkspace(db, f.workers, pending, "a".repeat(40));
+    const [settled] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, workspace!.id));
+    expect(settled.metadata?.workspaceProviderRemoved).toBe(true);
+    expect(cache.release).toHaveBeenCalledTimes(2);
   });
   it("rejects a changed task revision before calling the provider", async () => {
     const f = await fixture(); await enable(f.pluginId);

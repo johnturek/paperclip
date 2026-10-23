@@ -92,8 +92,8 @@ import {
   claudeCommandLooksLike,
   claudeCommandSupportsEffortFlag,
   minimumClaudeCliVersionForModel,
-  readClaudeCommandVersion,
 } from "./cli-capabilities.js";
+import { prepareCompatibleClaudeCommand } from "./sandbox-cli-version.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
 import { prepareClaudePromptBundle } from "./prompt-cache.js";
@@ -474,7 +474,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     authToken,
     onLog,
   });
-  const {
+  let {
     command,
     resolvedCommand,
     cwd,
@@ -1316,7 +1316,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? minimumClaudeCliVersionForModel(model)
       : null;
     if (minimumCliVersion) {
-      const detectedCliVersion = await readClaudeCommandVersion({
+      const prepared = await prepareCompatibleClaudeCommand({
         runId,
         command,
         target: runtimeExecutionTarget,
@@ -1324,7 +1324,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         env,
         timeoutSec,
         graceSec,
+        minimumVersion: minimumCliVersion,
       });
+      command = prepared.command;
+      resolvedCommand = prepared.command === "claude" ? resolvedCommand : prepared.command;
+      const detectedCliVersion = prepared.version;
       if (
         !detectedCliVersion ||
         !claudeCliVersionAtLeast(detectedCliVersion, minimumCliVersion)

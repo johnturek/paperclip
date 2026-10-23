@@ -114,6 +114,16 @@ remaining operations before qualifying the whole capability.
 Gaps: Environment test path checks creation/configuration policy; missing provider auth
 must use its owner setup flow.
 
+Scoped source-only Claude CLI preparation: both the selected environment test
+and normal CLI execution use
+[versioned sandbox preparation](../../packages/adapters/claude-local/src/server/sandbox-cli-version.ts).
+An outdated default sandbox command can use a private pinned compatible CLI;
+local, SSH and custom commands are not replaced. The selected model, engine,
+account and existing actor/company checks remain authoritative. Installer
+failure cannot turn an incompatible CLI into a passing probe. Local subprocess
+controls exercise version checks and installer outcomes; live agent and
+subscription access are `not-run` for this change.
+
 Scoped Legacy Codex shell delivery: resolved task configuration can explicitly
 assign service-secret variables to shell tools through ACP or CLI execution.
 The existing configuration and secret-access checks still authorize that binding;

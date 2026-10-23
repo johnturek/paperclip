@@ -2103,6 +2103,17 @@ concurrent listings do not skip healthy logs because another listing is busy.
 
 ### Preinstalled remote runner runtime
 
+Claude CLI tests and runs prepare a compatible runtime when a managed sandbox's
+default `claude` command is older than the selected model requires. Preparation
+installs the exact minimum supported package into a versioned workspace runtime
+directory, then verifies and launches that executable. It does not replace the
+image's global CLI or change the model, account, or execution engine. Compatible
+private installations are reused. Custom commands, local and SSH targets retain
+their existing operator-managed version checks. Installation failure or an
+unverified version still blocks launch. Cloud onboarding omits manual shell
+debugging instructions; self-hosted onboarding retains them after deployment
+metadata is known.
+
 For fast sandbox startup, bake `paperclip-runnerd` and the latest stable agent
 CLIs into the sandbox image. Keep one version of each CLI shared by native and
 local adapters; never retain an older global CLI beside a newer private copy.

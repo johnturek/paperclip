@@ -54,6 +54,13 @@ Claude native setup uses the existing Anthropic API-key or subscription connecti
 flow. Record the selected account separately from successful execution; unavailable
 models/authentication and unsupported Legacy-only options must fail visibly.
 
+Claude CLI tests and runs also prepare a compatible private executable when a
+managed sandbox image's default CLI is too old for the selected model. Verify
+the command used for the hello test and task, reuse of a compatible private
+installation, and a blocking failure when installation cannot establish a valid
+version. Local, SSH and explicit custom commands retain operator management.
+Cloud onboarding must not offer shell commands the customer cannot run.
+
 Manual: Select the intended adapter and account, refresh model choices, and run its environment test. Save, reload, then execute a small task. Repeat with a deliberately unavailable account and verify the failure remains visible.
 
 For Legacy Codex, assign a service secret such as `SLACK_BOT_TOKEN` through agent

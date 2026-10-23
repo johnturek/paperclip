@@ -732,6 +732,29 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
+    it.each([false, true])("shows manual CLI debugging only outside managed Cloud (managed: %s)", async managed => {
+      localHealth.get.mockResolvedValue({ deploymentMode: "authenticated", ...(managed ? { cloud: { managed: true, managedBy: "paperclip-cloud" } } : {}) });
+      mockAgentsApi.testEnvironment.mockResolvedValue({ adapterType: "claude_local", status: "fail", testedAt: new Date().toISOString(),
+        checks: [{ code: "claude_hello_probe_failed", level: "error", message: "The runtime test did not finish." }] });
+      mockCompaniesApi.create.mockResolvedValue({ id: "company-new", issuePrefix: "INI" });
+      const { root } = await openStepOne();
+      try {
+        await clickByText(t => t.startsWith("Continue"));
+        await act(async () => setControlledValue(document.body.querySelector("#onboarding-agent-name") as HTMLInputElement, "Ada"));
+        await flushReact();
+        await clickByText(isArcPrimary);
+        await pickFirstSource(clickByText);
+        await clickByText(isArcPrimary);
+        expect(document.body.textContent).toContain("The runtime test did not finish.");
+        expect(document.body.textContent?.includes("Manual debug")).toBe(!managed);
+        expect(document.body.textContent?.includes("--output-format stream-json")).toBe(!managed);
+        expect(document.body.textContent?.includes("Fix the reported checks")).toBe(!managed);
+        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    });
+
     it("hires from a legacy draft that saved an empty role", async () => {
       // `agentRole: ""` was this field's default before the arc stopped asking
       // for a role, so every draft saved by an earlier build carries it. `??`

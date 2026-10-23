@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import type { AdapterExecutionTarget, AdapterSandboxInstallCommandCheck } from "@paperclipai/adapter-utils/execution-target";
 
 const {
   ensureAdapterExecutionTargetDirectory,
@@ -17,7 +17,7 @@ const {
     probeResult,
     ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
     ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
-    maybeRunSandboxInstallCommand: vi.fn(async () => null),
+    maybeRunSandboxInstallCommand: vi.fn(async (): Promise<AdapterSandboxInstallCommandCheck | null> => null),
     runAdapterExecutionTargetProcess: vi.fn(async () => ({
       exitCode: probeResult.value.exitCode,
       signal: null,
@@ -141,6 +141,28 @@ describe("claude sandbox auth-missing check", () => {
 });
 
 describe("claude CLI model compatibility check", () => {
+  it("runs the hello probe with the compatible private CLI after updating an old sandbox", async () => {
+    const command = "/home/daytona/paperclip-workspace/.paperclip-runtime/claude-cli/2.1.280/bin/claude";
+    const response = { signal: null, timedOut: false, pid: 123, startedAt: new Date().toISOString(), stderr: "" };
+    runAdapterExecutionTargetProcess
+      .mockResolvedValueOnce({ ...response, exitCode: 0, stdout: "2.1.263 (Claude Code)\n" })
+      .mockResolvedValueOnce({ ...response, exitCode: 1, stdout: "" })
+      .mockResolvedValueOnce({ ...response, exitCode: 0, stdout: "2.1.280 (Claude Code)\n" });
+    maybeRunSandboxInstallCommand.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      code: "claude_install_command_run", level: "info", message: "Installed compatible Claude runtime.",
+    });
+    probeResult.value = { exitCode: 0, stdout: [initLine,
+      JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "hello", session_id: "abc" }),
+    ].join("\n"), stderr: "" };
+    const result = await testEnvironment({ companyId: "company-1", adapterType: "claude_local",
+      config: { engine: "cli", model: "claude-opus-5-5", env: { CLAUDE_CODE_OAUTH_TOKEN: "fixture-subscription" } },
+      executionTarget: sandboxTarget, environmentName: "Daytona" });
+    expect(result.status).toBe("pass");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_hello_probe_passed" }));
+    const hello = runAdapterExecutionTargetProcess.mock.calls.find(call => (call as unknown as [string, unknown, string, string[]])[3]?.includes("--print"));
+    expect((hello as unknown as [string, unknown, string])[2]).toBe(command);
+  });
+
   it.each([
     ["claude-fable-5-1", "2.1.251", "2.1.247"],
     ["claude-opus-5-5", "2.1.280", "2.1.279"],
@@ -157,7 +179,7 @@ describe("claude CLI model compatibility check", () => {
       adapterType: "claude_local",
       config: {
         engine: "cli",
-        command: "claude",
+        command: "/opt/operator/claude",
         model,
       },
       executionTarget: sandboxTarget,

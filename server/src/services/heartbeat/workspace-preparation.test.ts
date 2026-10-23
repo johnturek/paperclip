@@ -185,7 +185,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       status: "ready", categories: ["workspace"], manifestJson: { id: pluginKey, apiVersion: 1, version: "1.0.0",
         displayName: "Tasks", description: "Tasks", author: "Test", categories: ["workspace"],
         capabilities: ["environment.drivers.register"], entrypoints: { worker: "./worker.js" },
-        environmentDrivers: [{ driverKey: "tasks", displayName: "Task VM", supportsTasks: true, freshWorkspaceVersion: 1 }] } });
+        environmentDrivers: [{ driverKey: "tasks", displayName: "Task VM", configSchema: { type: "object" }, supportsTasks: true, freshWorkspaceVersion: 1 }] } });
     input.agent.adapterType = "paperclip_runner";
     input.task.issueRef = { ...input.task.issueRef!, projectId: null, projectWorkspaceId: null };
     input.task.context = { issueId: issue.id };

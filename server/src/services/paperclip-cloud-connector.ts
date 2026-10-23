@@ -545,9 +545,6 @@ export function createPaperclipCloudConnector(input: {
           }
           events.push(event);
         } catch {
-          // The outer envelope already authenticated this delivery ID. Leave
-          // the failed event unacknowledged in Cloud, and process its siblings.
-          // Never pass unauthenticated bytes to the webhook dispatcher.
           failedEventIds.push(event.id);
         }
       }

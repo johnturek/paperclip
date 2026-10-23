@@ -24,8 +24,6 @@ type Api = { request<T>(path: string, options?: { method?: string; body?: unknow
 type Lease = { commit<T>(write: (tx: Transaction) => Promise<T>): Promise<T> };
 type Source = GitHubResponseSource;
 type Comment = { id: number; body?: string; html_url: string; user?: { login?: string } };
-// Request ownership and response status need only these context keys. Keep
-// prompts, runtime descriptors, results and log excerpts in their owning reads.
 const responseRunColumns = {
   id: heartbeatRuns.id,
   companyId: heartbeatRuns.companyId,

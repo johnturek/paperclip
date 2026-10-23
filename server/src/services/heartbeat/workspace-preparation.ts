@@ -143,7 +143,7 @@ export interface HeartbeatWorkspacePreparationInput {
   services: {
     workspaceWorkers?: WorkspaceWorkers;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "resolveEnvironment" | "acquireForRun" | "realizeForRun">;
-    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "create" | "update" | "bindTaskWorkspace" | "prepareTaskRepositoriesForAdmission" | "assertTaskRepositoryPublicationAllowed" | "prepareConfiguredRepositoryCopy" | "assertTaskRepositoryRecoveryBinding">;
+    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "create" | "update" | "getStoredById" | "bindTaskWorkspace" | "prepareTaskRepositoriesForAdmission" | "assertTaskRepositoryPublicationAllowed" | "prepareConfiguredRepositoryCopy" | "assertTaskRepositoryRecoveryBinding">;
     workspaceOperationsSvc: Pick<ReturnType<typeof workspaceOperationService>, "createRecorder">;
     resolveWorkspaceForRun: WorkspaceResolver["resolveWorkspaceForRun"];
     resolveReusedGitWorkspaceAnchor: WorkspaceResolver["resolveReusedGitWorkspaceAnchor"];
@@ -420,7 +420,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const freshTaskReservationId = providerFresh && pluginTaskWorkspace && !pluginPrepared && !resolvedWorkspace.projectId && issueId
     ? await reserveFreshPluginTaskWorkspace({ db, companyId: agent.companyId, issueId, runId: run.id, agentId: agent.id,
         fresh: providerFresh, expectedBindingRevision: previousProviderBindingRevision, owner: taskWorkspaceOwner! }) : null;
-  const freshTaskReservation = freshTaskReservationId ? await executionWorkspacesSvc.getById(freshTaskReservationId) : null;
+  const freshTaskReservation = freshTaskReservationId ? await executionWorkspacesSvc.getStoredById(agent.companyId, freshTaskReservationId) : null;
   const copyOnlyProvisioning = pluginPrepared ? true : await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
     companyId: agent.companyId,
     task: issueRef ? { ...issueRef, workspaceSelection: input.task.workspaceSelection } : null,

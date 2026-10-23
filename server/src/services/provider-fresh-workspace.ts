@@ -125,3 +125,9 @@ export async function reserveFreshPluginTaskWorkspace(input: {
     return input.fresh.attemptId;
   });
 }
+
+export async function releaseProviderRecoveryTransfers(companyId: string, input: PluginFreshWorkspace) {
+  const fresh = freshWorkspaceSchema.parse(input);
+  await rm(path.join(resolvePaperclipInstanceRoot(), "runtime", "provider-recovery", companyId, fresh.attemptId),
+    { recursive: true, force: true });
+}

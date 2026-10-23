@@ -213,3 +213,7 @@ A provider reconciles the same attempt and workspace identity after an ambiguous
 reply. It must not replace the failed workspace or allocate another workspace
 when preparation is repeated. Providers without this version remain unavailable
 for fresh attempts; ordinary preparation and reuse retain their existing contract.
+
+Core keeps transfer files while preparation is uncertain. Confirmed task completion
+and provider workspace removal release these disposable copies. The descriptors
+remain stable: a later preparation downloads the same verified files again.

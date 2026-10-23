@@ -1,5 +1,5 @@
 import { effectiveProjectWorkspacePolicy, isWorkspaceProvider } from "./project-workspace-provider.js";
-import { stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
+import { releaseProviderRecoveryTransfers, stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
 import { randomUUID, createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -751,6 +751,8 @@ async function finishPendingRemoval(
   });
   if (!updated)
     throw conflict("Workspace changed during removal reconciliation");
+  if (updated.metadata?.workspaceProviderFresh)
+    await releaseProviderRecoveryTransfers(updated.companyId, updated.metadata.workspaceProviderFresh as PluginFreshWorkspace);
   return updated;
 }
 
@@ -763,7 +765,11 @@ export async function removePluginWorkspace(
   workspace = await reconcilePluginWorkspaceReservation(db, workers, workspace);
   if (workspace.metadata?.workspaceProviderRestoration)
     throw conflict("Workspace restoration must be reconciled before removal");
-  if (workspace.metadata?.workspaceProviderRemoved === true) return;
+  if (workspace.metadata?.workspaceProviderRemoved === true) {
+    if (workspace.metadata?.workspaceProviderFresh)
+      await releaseProviderRecoveryTransfers(workspace.companyId, workspace.metadata.workspaceProviderFresh as PluginFreshWorkspace);
+    return;
+  }
   if (workspace.metadata?.workspaceProviderRemoval) {
     await finishPendingRemoval(db, workers, workspace);
     return;

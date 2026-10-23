@@ -1,4 +1,4 @@
-import { stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
+import { releaseProviderRecoveryTransfers, stageProviderFreshWorkspace } from "./provider-fresh-workspace.js";
 import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { settlePluginTaskCredentialHandoff } from "./plugin-task-credential-writeback.js";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
@@ -195,6 +195,8 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
       }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, input.companyId)));
     }
     if (operation.kind === "complete") {
+      if (freshWorkspace && metadata.runnerTaskExecutionStopped === true)
+        await releaseProviderRecoveryTransfers(input.companyId, freshWorkspace);
       await db.update(environmentLeases).set({
         metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || '{"runnerTaskDispatched":false}'::jsonb`,
       }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, input.companyId),

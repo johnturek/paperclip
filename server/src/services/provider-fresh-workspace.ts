@@ -1,3 +1,4 @@
+import { assertTaskWorkspaceExecutionAccess } from "./task-workspace-access.js";
 import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -88,7 +89,7 @@ async function verify(file: string, expected: { sha256: string; byteSize: number
 }
 
 export async function reserveFreshPluginTaskWorkspace(input: {
-  db: Db; companyId: string; issueId: string; runId: string; agentId: string;
+  db: Db; companyId: string; issueId: string; runId: string; agentId: string; responsibleUserId: string | null;
   fresh: PluginFreshWorkspace; expectedBindingRevision: number;
   owner: Record<string, unknown>;
 }) {
@@ -99,6 +100,10 @@ export async function reserveFreshPluginTaskWorkspace(input: {
       eq(heartbeatRuns.companyId, input.companyId)));
     if (!task || !run || run.agentId !== input.agentId || run.status !== "running" ||
         ![run.issueId, run.nativeIssueId].includes(input.issueId)) throw forbidden("Workspace preparation no longer has an active run");
+    await assertTaskWorkspaceExecutionAccess(tx, { type: "agent", source: "agent_jwt",
+      companyId: input.companyId, agentId: input.agentId, runId: input.runId,
+      onBehalfOfUserId: input.responsibleUserId === "local-board" ? null : input.responsibleUserId,
+    }, input.companyId, { issueId: input.issueId });
     const [reserved] = await tx.select().from(executionWorkspaces).where(and(
       eq(executionWorkspaces.companyId, input.companyId), eq(executionWorkspaces.sourceIssueId, input.issueId),
       eq(executionWorkspaces.id, input.fresh.attemptId)));

@@ -177,6 +177,34 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect(call).not.toHaveBeenCalled();
   });
 
+  it("keeps a fresh projectless reservation stable through repeated preparation", async () => {
+    const { input, issue, envOrchestrator } = await fixture();
+    await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
+    const pluginKey = "test.fresh-projectless";
+    await db.insert(plugins).values({ pluginKey, packageName: "test-tasks", version: "1.0.0", apiVersion: 1,
+      status: "ready", categories: ["workspace"], manifestJson: { id: pluginKey, apiVersion: 1, version: "1.0.0",
+        displayName: "Tasks", description: "Tasks", author: "Test", categories: ["workspace"],
+        capabilities: ["environment.drivers.register"], entrypoints: { worker: "./worker.js" },
+        environmentDrivers: [{ driverKey: "tasks", displayName: "Task VM", supportsTasks: true, freshWorkspaceVersion: 1 }] } });
+    input.agent.adapterType = "paperclip_runner";
+    input.task.issueRef = { ...input.task.issueRef!, projectId: null, projectWorkspaceId: null };
+    input.task.context = { issueId: issue.id };
+    input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id, sourceRunId: input.run.id, retainedSourceIds: [] };
+    input.policy.requestedExecutionWorkspaceMode = input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.config.mergedConfig = { workspaceStrategy: { type: "project_primary" } };
+    input.environment.selectedEnvironmentForConfig = { ...input.environment.localEnvironment, driver: "plugin",
+      config: { pluginKey, driverKey: "tasks" } };
+    const stopped = new Error("Reached projectless environment handoff");
+    const acquire = vi.spyOn(envOrchestrator, "acquireForRun").mockRejectedValue(stopped);
+    const read = vi.spyOn(input.services.executionWorkspacesSvc, "getStoredById");
+    for (let attempt = 0; attempt < 2; attempt++) await expect(prepareHeartbeatWorkspace(db, input)).rejects.toBe(stopped);
+    expect(read).toHaveBeenCalledWith(input.agent.companyId, input.run.id);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    for (const [args] of acquire.mock.calls) expect(args.persistedExecutionWorkspace).toMatchObject({ id: input.run.id,
+      providerType: "adapter_managed", metadata: { runnerTaskFreshWorkspace: { attemptId: input.run.id } } });
+    const rows = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.companyId, input.agent.companyId));
+    expect(rows).toHaveLength(1);
+  });
   const readIssue = (id: string) => db.select().from(issues).where(eq(issues.id, id)).then(rows => rows[0]!);
   const readRun = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
   const leases = (id: string) => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, id));

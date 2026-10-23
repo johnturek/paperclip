@@ -419,7 +419,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   });
   const freshTaskReservationId = providerFresh && pluginTaskWorkspace && !pluginPrepared && !resolvedWorkspace.projectId && issueId
     ? await reserveFreshPluginTaskWorkspace({ db, companyId: agent.companyId, issueId, runId: run.id, agentId: agent.id,
-        fresh: providerFresh, expectedBindingRevision: previousProviderBindingRevision, owner: taskWorkspaceOwner! }) : null;
+        fresh: providerFresh, responsibleUserId, expectedBindingRevision: previousProviderBindingRevision, owner: taskWorkspaceOwner! }) : null;
   const freshTaskReservation = freshTaskReservationId ? await executionWorkspacesSvc.getStoredById(agent.companyId, freshTaskReservationId) : null;
   const copyOnlyProvisioning = pluginPrepared ? true : await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
     companyId: agent.companyId,

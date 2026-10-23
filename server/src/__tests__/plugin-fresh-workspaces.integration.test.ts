@@ -82,7 +82,7 @@ describe.skipIf(!support.supported)("provider-owned fresh retry reservations", (
     await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, f.issueId));
     const owner = { agentId: f.input.agentId, environmentId: randomUUID(), pluginKey: "test.tasks", driverKey: "tasks" };
     const input = { db, companyId: f.companyId, issueId: f.issueId, runId: f.input.runId,
-      agentId: f.input.agentId, fresh: f.fresh, owner, expectedBindingRevision: 1 };
+      agentId: f.input.agentId, responsibleUserId: null, fresh: f.fresh, owner, expectedBindingRevision: 1 };
     const id = await reserveFreshPluginTaskWorkspace(input);
     expect(await reserveFreshPluginTaskWorkspace(input)).toBe(id);
     const [workspace] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, id));
@@ -91,5 +91,7 @@ describe.skipIf(!support.supported)("provider-owned fresh retry reservations", (
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
     expect(task.executionWorkspaceId).toBe(id);
     expect(task.workspaceBindingRevision).toBe(2);
+    await db.update(heartbeatRuns).set({ responsibleUserId: "changed-user" }).where(eq(heartbeatRuns.id, f.input.runId));
+    await expect(reserveFreshPluginTaskWorkspace(input)).rejects.toThrow("responsible user changed");
   });
 });
